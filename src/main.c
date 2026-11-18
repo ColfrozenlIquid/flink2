@@ -9,8 +9,8 @@
 #include <string.h>
 #include <time.h>
 
-#define PAYLOAD (4096 * 4096)
-#define REPS 5
+#define PAYLOAD (4096 * 16)
+#define REPS 500
 
 static inline double now_sec(void) {
     struct timespec ts;
@@ -29,6 +29,10 @@ int main() {
         return 1;
     }
 
+    filter_init();
+
+
+
     uint64_t rng = 88172645463325252ULL;
 
     for (size_t i = 0; i < PAYLOAD; i++) {
@@ -42,6 +46,14 @@ int main() {
     float* mapped = aligned_alloc(32, BATCH_SIZE * (size_t)sizeof(float));
     uint32_t* selected = aligned_alloc(32, BATCH_SIZE * (size_t)sizeof(uint32_t));
 
+    uint32_t ref[BATCH_SIZE];
+    size_t n_ref = filter_gt_branchless(all_prices, BATCH_SIZE, 100.0f, ref);
+    size_t n_simd = filter_gt_avx2(all_prices, BATCH_SIZE, 100.0f, selected);
+    if (n_ref != n_simd || memcmp(ref, selected, n_ref * sizeof(uint32_t)) != 0) {
+        fprintf(stderr, "filter mismatch!\n");
+        return 1;
+    }
+
     double best_filter = 1e30, best_map = 1e30, best_sum = 1e30;
     double best_total = 1e30;
 
@@ -54,7 +66,7 @@ int main() {
             const float* price = all_prices + b * BATCH_SIZE;
 
             double a = now_sec();
-            kept += filter_gt_branchless(price, BATCH_SIZE, 100.0f, selected);
+            kept += filter_gt_avx2(price, BATCH_SIZE, 100.0f, selected);
             double c = now_sec();
             map_mul(price, BATCH_SIZE, 1.19f, mapped);
             double d = now_sec();
