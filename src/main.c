@@ -31,8 +31,6 @@ int main() {
 
     filter_init();
 
-
-
     uint64_t rng = 88172645463325252ULL;
 
     for (size_t i = 0; i < PAYLOAD; i++) {
@@ -91,11 +89,11 @@ int main() {
     }
 
     printf("kept=%zu total=%f\n", kept, total);
-    printf("filter: %.3f ms\n", best_filter * 1e3);
-    printf("map:    %.3f ms\n", best_map * 1e3);
-    printf("sum:    %.3f ms\n", best_sum * 1e3);
+    printf("filter: %.6f ms\n", best_filter * 1e3);
+    printf("map:    %.6f ms\n", best_map * 1e3);
+    printf("sum:    %.6f ms\n", best_sum * 1e3);
     printf(
-        "sum of operators: %.3f ms, %.1f M rows/s\n", best_total * 1e3, PAYLOAD / best_total / 1e6
+        "sum of operators: %.6f ms, %.1f M rows/s\n", best_total * 1e3, PAYLOAD / best_total / 1e6
     );
 
     batch_free(&batch);
