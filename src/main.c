@@ -1,6 +1,6 @@
-#include "../include/batch.h"
 #include "../include/ops_scalar.h"
 #include "../include/ops_simd.h"
+#include "../include/types/types.h"
 #include "../include/util.h"
 #include <stddef.h>
 #include <stdint.h>
@@ -19,7 +19,7 @@ static inline double now_sec(void) {
 }
 
 int main() {
-    Batch batch;
+    batch_t batch;
     batch_allocate(&batch, 32);
 
     uint32_t* all_user = aligned_alloc(32, PAYLOAD * sizeof(uint32_t));
