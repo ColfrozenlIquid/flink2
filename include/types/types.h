@@ -11,10 +11,10 @@ typedef struct {
     type_t type;
 } field_def_t;
 
-#define SCHEMA_FILED_COUNT 16
+#define SCHEMA_FIELD_COUNT 16
 
 typedef struct {
-    field_def_t fields[SCHEMA_FILED_COUNT];
+    field_def_t fields[SCHEMA_FIELD_COUNT];
     size_t count;
 } schema_t;
 

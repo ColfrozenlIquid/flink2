@@ -8,7 +8,7 @@ int pool_init(batch_pool_t* pool, const schema_t* schema, size_t pool_size) {
     pool->pool_size = pool_size;
     pool->batch_bytes = batch_layout(schema, pool->col_offset);
 
-    // This gives us a continous slab of 64 Byte aligned memory batches, sized to the pool size
+    // This gives us a continuous slab of 64 Byte aligned memory batches, sized to the pool size
     pool->slab = aligned_alloc(64, pool->batch_bytes * pool_size);
     pool->batches = malloc(pool_size * sizeof(batch_t));
     pool->free_list = malloc(pool_size * sizeof(batch_t*));
