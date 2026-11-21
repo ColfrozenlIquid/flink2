@@ -19,7 +19,11 @@ endif()
 
 add_executable(flink2
   src/main.c
-  src/batch.c
+  src/types/batch.c
+  src/types/plan.c
+  src/types/pool.c
+  src/types/schema.c
+
   src/util.c
   src/ops_scalar.c
   src/ops_simd.c

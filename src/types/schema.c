@@ -3,6 +3,10 @@
 #include <stdio.h>
 #include <string.h>
 
+void schema_init(schema_t* schema) {
+    memset(schema, 0, sizeof(schema_t));
+}
+
 int schema_add_field(schema_t* schema, const char* name, size_t len, type_t type) {
     if (schema->count >= SCHEMA_FILED_COUNT) {
         fprintf(stderr, "Schema can only contain %d fields\n", SCHEMA_FILED_COUNT);

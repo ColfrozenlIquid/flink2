@@ -18,6 +18,8 @@ typedef struct {
     size_t count;
 } schema_t;
 
+void schema_init(schema_t* schema);
+
 int schema_add_field(schema_t* schema, const char* name, size_t len, type_t type);
 
 int schema_find(schema_t* schema, const char* name, size_t len);
@@ -55,12 +57,25 @@ typedef struct {
     size_t capacity;   // rows allocated
 } batch_t;
 
-int batch_allocate(schema_t* schema, batch_t* out);
+void batch_init(schema_t* schema, uint8_t* base, batch_t* out, const size_t* col_offset);
 
-void* allocate_column(size_t rows, size_t element_size);
+size_t batch_layout(const schema_t* schema, size_t col_offset[16]);
 
-void batch_free(batch_t* in);
+typedef struct {
+    schema_t schema;       // defines what schema the pool is using
+    size_t batch_bytes;    // bytes per batch
+    size_t col_offset[16]; // byte offset of each column within a batch
+    uint8_t* slab;         // aligned alloc for the entire pool
+    batch_t* batches;      // array of pool size batches
+    batch_t** free_list;   // stack
+    size_t free_count;
+    size_t pool_size;
+} batch_pool_t;
 
-void batch_fill_random(batch_t* in, size_t n, uint64_t* rng_state);
+int pool_init(batch_pool_t* pool, const schema_t* schema, size_t pool_size);
 
-void batch_destroy(batch_t* batch);
+void pool_destroy(batch_pool_t* pool);
+
+batch_t* pool_acquire(batch_pool_t* pool);
+
+void pool_release(batch_pool_t* pool, batch_t* batch);
