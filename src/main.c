@@ -3,6 +3,7 @@
 #include "../include/source/reader.h"
 #include "../include/types/types.h"
 #include "../include/util.h"
+#include "math.h"
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -10,149 +11,209 @@
 #include <string.h>
 #include <time.h>
 
-#define PAYLOAD (4096 * 16)
-#define REPS 500
-
 static inline double now_sec(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
-    return ts.tv_sec + ts.tv_nsec * 1e-9;
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
 }
+
+typedef struct {
+    size_t batches, rows_in, rows_kept;
+    double total;
+    double t_read, t_filter, t_gather, t_map, t_sum; // seconds
+} stats_t;
+
+int run_pipeline(
+    source_t src,
+    const wire_layout_t* wire,
+    const schema_t* schema,
+    float threshold,
+    float factor,
+    int flush_ms,
+    stats_t* st
+) {
+    int rc = -1;
+    batch_pool_t pool;
+    reader_t reader;
+    float* tmp = aligned_alloc(64, BATCH_SIZE * sizeof(float));
+    float* mapped = aligned_alloc(64, BATCH_SIZE * sizeof(float));
+    uint32_t* selected = aligned_alloc(64, BATCH_SIZE * sizeof(uint32_t));
+    if (!tmp || !mapped || !selected)
+        goto out_scratch;
+
+    int price_col = schema_find((schema_t*)schema, "price", 5);
+    if (price_col < 0)
+        goto out_scratch;
+
+    if (pool_init(&pool, schema, 2) != 0)
+        goto out_scratch;
+    if (reader_init(&reader, src, wire, schema, 64 * 1024) != 0)
+        goto out_pool;
+
+    memset(st, 0, sizeof *st);
+
+    for (;;) {
+        batch_t* b = pool_acquire(&pool);
+        if (!b)
+            break;
+
+        double t0 = now_sec();
+        ssize_t n = reader_fill_batch(&reader, b, flush_ms);
+        double t1 = now_sec();
+        if (n <= 0) {
+            pool_release(&pool, b);
+            rc = (n < 0) ? -1 : 0;
+            break;
+        }
+
+        const float* price = b->cols[price_col];
+        size_t rows = b->rows_count;
+
+        size_t kept = filter_gt_avx2(price, rows, threshold, selected);
+        double t2 = now_sec();
+
+        for (size_t i = 0; i < kept; i++)
+            tmp[i] = price[selected[i]];
+        double t3 = now_sec();
+
+        map_mul(tmp, kept, factor, mapped);
+        double t4 = now_sec();
+
+        st->total += agg_sum_avx2(mapped, kept);
+        double t5 = now_sec();
+
+        st->t_read += t1 - t0;
+        st->t_filter += t2 - t1;
+        st->t_gather += t3 - t2;
+        st->t_map += t4 - t3;
+        st->t_sum += t5 - t4;
+
+        st->batches++;
+        st->rows_in += rows;
+        st->rows_kept += kept;
+
+        pool_release(&pool, b);
+    }
+
+    reader_destroy(&reader);
+out_pool:
+    pool_destroy(&pool);
+out_scratch:
+    free(tmp);
+    free(mapped);
+    free(selected);
+    return rc;
+}
+
+#define PAYLOAD (1u << 22) // 4M rows, about 32 MB on the wire
 
 #pragma pack(push, 1)
 typedef struct {
     int32_t user_id;
     float price;
-} wire_row_t; // 8 bytes on the wire
+} wire_row_t; // 8 bytes per row
 #pragma pack(pop)
 
-void create_pool(void) {
-    batch_pool_t pool;
-    reader_t reader;
+int main(void) {
+    filter_init();
+    // 1. schema: what the engine stores in memory
     schema_t schema;
     schema.count = 0;
     schema_add_field(&schema, "user_id", 7, T_I32);
     schema_add_field(&schema, "price", 5, T_F32);
-    if (pool_init(&pool, &schema, 5) != 0)
-        return;
 
-    // fake incoming stream
-    wire_row_t rows[6];
-    for (int i = 0; i < 6; i++)
-        rows[i] = (wire_row_t){.user_id = 100 + i, .price = 1.5f * (float)(i + 1)};
-
-    // max_chunk = 5 splits rows mid-field, like TCP could
-    mem_source_t m = {.data = (const uint8_t*)rows, .len = sizeof rows, .max_chunk = 5};
-
+    // 2. wire layout: what the sender puts on the socket
     wire_layout_t wire = {0};
     wire.row_size = sizeof(wire_row_t);
     wire.offset[0] = offsetof(wire_row_t, user_id);
     wire.offset[1] = offsetof(wire_row_t, price);
 
-    if (reader_init(&reader, (source_t){mem_read, &m}, &wire, &schema, 64) != 0) {
-        pool_destroy(&pool);
-        return;
+    // 3. fake incoming stream (same generator as your old benchmark)
+    wire_row_t* rows = malloc((size_t)PAYLOAD * sizeof *rows);
+    if (!rows) {
+        fprintf(stderr, "alloc failed\n");
+        return 1;
     }
 
-    batch_t* batch1 = pool_acquire(&pool);
-    batch_t* batch2 = pool_acquire(&pool);
-    printf("Free count after acquire: %zu\n", pool.free_count);
+    uint64_t rng = 88172645463325252ULL;
+    const float threshold = 100.0f, factor = 1.19f;
+    size_t ref_kept = 0;
+    double ref_total = 0;
 
-    ssize_t got = reader_fill_batch(&reader, batch1, -1);
-    printf("filled %zd rows\n", got);
-    // batch1->cols[0] is the int32 user_id column, cols[1] the float price column
+    for (size_t i = 0; i < PAYLOAD; i++) {
+        rows[i].user_id = (int32_t)((uint32_t)(xorshift64(&rng) >> 32) % 1000);
+        rows[i].price = ((uint32_t)(xorshift64(&rng) >> 32) % 20000) / 100.0f;
+        if (rows[i].price > threshold) { // scalar reference answer
+            ref_kept++;
+            ref_total += (double)(rows[i].price * factor);
+        }
+    }
 
-    pool_release(&pool, batch1);
-    pool_release(&pool, batch2);
+    // 4. source: max_chunk = 1460 mimics TCP segments, so rows get split mid-field
+    mem_source_t m = {
+        .data = (const uint8_t*)rows,
+        .len = (size_t)PAYLOAD * sizeof *rows,
+        .pos = 0,
+        .max_chunk = 1460,
+    };
 
-    printf("Free count after release: %zu\n", pool.free_count);
+    enum { REPS = 10 };
+    stats_t best = {0};
+    double best_wall = 1e30;
 
-    reader_destroy(&reader);
-    pool_destroy(&pool);
-}
-int main() {
-    create_pool();
-    //     batch_t batch;
-    //     batch_allocate(&batch, 32);
-    //
-    //     uint32_t* all_user = aligned_alloc(32, PAYLOAD * sizeof(uint32_t));
-    //     float* all_prices = aligned_alloc(32, PAYLOAD * sizeof(float));
-    //     if (!all_user || !all_prices) {
-    //         fprintf(stderr, "Allocation failed");
-    //         return 1;
-    //     }
-    //
-    //     filter_init();
-    //
-    //     uint64_t rng = 88172645463325252ULL;
-    //
-    //     for (size_t i = 0; i < PAYLOAD; i++) {
-    //         all_user[i] = (uint32_t)(xorshift64(&rng) >> 32) % 1000;
-    //         all_prices[i] = ((uint32_t)(xorshift64(&rng) >> 32) % 20000) / 100.0f;
-    //     }
-    //
-    //     size_t kept = 0;
-    //     double total = 0;
-    //
-    //     float* mapped = aligned_alloc(32, BATCH_SIZE * (size_t)sizeof(float));
-    //     uint32_t* selected = aligned_alloc(32, BATCH_SIZE * (size_t)sizeof(uint32_t));
-    //
-    //     uint32_t ref[BATCH_SIZE];
-    //     size_t n_ref = filter_gt_branchless(all_prices, BATCH_SIZE, 100.0f, ref);
-    //     size_t n_simd = filter_gt_avx2(all_prices, BATCH_SIZE, 100.0f, selected);
-    //     if (n_ref != n_simd || memcmp(ref, selected, n_ref * sizeof(uint32_t)) != 0) {
-    //         fprintf(stderr, "filter mismatch!\n");
-    //         return 1;
-    //     }
-    //
-    //     double best_filter = 1e30, best_map = 1e30, best_sum = 1e30;
-    //     double best_total = 1e30;
-    //
-    //     for (int i = 0; i < REPS; i++) {
-    //         kept = 0;
-    //         total = 0;
-    //         double t_filter = 0, t_map = 0, t_sum = 0;
-    //
-    //         for (size_t b = 0; b < PAYLOAD / BATCH_SIZE; b++) {
-    //             const float* price = all_prices + b * BATCH_SIZE;
-    //
-    //             double a = now_sec();
-    //             kept += filter_gt_avx2(price, BATCH_SIZE, 100.0f, selected);
-    //             double c = now_sec();
-    //             map_mul(price, BATCH_SIZE, 1.19f, mapped);
-    //             double d = now_sec();
-    //             total += agg_sum_avx2(mapped, BATCH_SIZE);
-    //             double e = now_sec();
-    //
-    //             t_filter += c - a;
-    //             t_map += d - c;
-    //             t_sum += e - d;
-    //         }
-    //
-    //         if (t_filter < best_filter)
-    //             best_filter = t_filter;
-    //         if (t_map < best_map)
-    //             best_map = t_map;
-    //         if (t_sum < best_sum)
-    //             best_sum = t_sum;
-    //
-    //         double rep_total = t_filter + t_map + t_sum;
-    //         if (rep_total < best_total)
-    //             best_total = rep_total;
-    //     }
-    //
-    //     printf("kept=%zu total=%f\n", kept, total);
-    //     printf("filter: %.6f ms\n", best_filter * 1e3);
-    //     printf("map:    %.6f ms\n", best_map * 1e3);
-    //     printf("sum:    %.6f ms\n", best_sum * 1e3);
-    //     printf(
-    //         "sum of operators: %.6f ms, %.1f M rows/s\n", best_total * 1e3, PAYLOAD / best_total
-    //         / 1e6
-    //     );
-    //
-    //     batch_free(&batch);
-    //     free(mapped);
-    //     free(selected);
+    for (int rep = 0; rep < REPS; rep++) {
+        m.pos = 0; // rewind the source each repetition
+        stats_t st;
+        double t0 = now_sec();
+        int rc = run_pipeline((source_t){mem_read, &m}, &wire, &schema, threshold, factor, 50, &st);
+        double wall = now_sec() - t0;
+        if (rc != 0) {
+            fprintf(stderr, "pipeline failed\n");
+            free(rows);
+            return 1;
+        }
+        if (wall < best_wall) {
+            best_wall = wall;
+            best = st;
+        } // keep the best whole run
+    }
 
-    return 0;
+    // baseline: one bulk memcpy of the same bytes
+    size_t bytes = (size_t)PAYLOAD * sizeof *rows;
+    uint8_t* dst = malloc(bytes);
+    double best_copy = 1e30;
+    for (int rep = 0; rep < REPS; rep++) {
+        double t0 = now_sec();
+        memcpy(dst, rows, bytes);
+        double dt = now_sec() - t0;
+        if (dt < best_copy)
+            best_copy = dt;
+        __asm__ volatile("" : : "r"(dst) : "memory"); // keep the compiler from removing it
+    }
+
+    double stages = best.t_read + best.t_filter + best.t_gather + best.t_map + best.t_sum;
+    printf(
+        "batches=%zu rows_in=%zu rows_kept=%zu total=%.2f\n", best.batches, best.rows_in,
+        best.rows_kept, best.total
+    );
+    printf("reference:     rows_kept=%zu total=%.2f\n", ref_kept, ref_total);
+    printf("wall: %.3f ms, %.1f M rows/s\n", best_wall * 1e3, best.rows_in / best_wall / 1e6);
+    printf("\nstage      ms      %%\n");
+    printf("read+dec  %7.3f  %5.1f\n", best.t_read * 1e3, 100 * best.t_read / stages);
+    printf("filter    %7.3f  %5.1f\n", best.t_filter * 1e3, 100 * best.t_filter / stages);
+    printf("gather    %7.3f  %5.1f\n", best.t_gather * 1e3, 100 * best.t_gather / stages);
+    printf("map       %7.3f  %5.1f\n", best.t_map * 1e3, 100 * best.t_map / stages);
+    printf("sum       %7.3f  %5.1f\n", best.t_sum * 1e3, 100 * best.t_sum / stages);
+    printf(
+        "\nbulk memcpy of %.1f MB: %.3f ms (%.1f GB/s)\n", bytes / 1e6, best_copy * 1e3,
+        bytes / best_copy / 1e9
+    );
+
+    int ok = best.rows_in == PAYLOAD && best.rows_kept == ref_kept &&
+             fabs(best.total - ref_total) <= 1e-3 * fabs(ref_total);
+    printf("%s\n", ok ? "OK" : "MISMATCH");
+
+    free(dst);
+    free(rows);
+    return ok ? 0 : 1;
 }
