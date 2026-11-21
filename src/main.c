@@ -209,6 +209,23 @@ int main(void) {
         bytes / best_copy / 1e9
     );
 
+    size_t chunks[] = {1460, 16384, 65536, 0};
+    for (size_t k = 0; k < sizeof chunks / sizeof *chunks; k++) {
+        m.max_chunk = chunks[k];
+        double best = 1e30;
+        stats_t bst = {0};
+        for (int rep = 0; rep < REPS; rep++) {
+            m.pos = 0;
+            stats_t st;
+            run_pipeline((source_t){mem_read, &m}, &wire, &schema, threshold, factor, 50, &st);
+            if (st.t_read < best) {
+                best = st.t_read;
+                bst = st;
+            }
+        }
+        printf("max_chunk=%6zu  read+dec=%.3f ms\n", chunks[k], best * 1e3);
+    }
+
     int ok = best.rows_in == PAYLOAD && best.rows_kept == ref_kept &&
              fabs(best.total - ref_total) <= 1e-3 * fabs(ref_total);
     printf("%s\n", ok ? "OK" : "MISMATCH");
