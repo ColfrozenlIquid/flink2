@@ -24,6 +24,9 @@ add_executable(flink2
   src/types/pool.c
   src/types/schema.c
 
+  src/source/reader.c
+  src/source/source.c
+
   src/util.c
   src/ops_scalar.c
   src/ops_simd.c

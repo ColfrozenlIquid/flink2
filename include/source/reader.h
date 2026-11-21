@@ -22,3 +22,13 @@ typedef struct {
 ssize_t reader_fill_batch(reader_t* reader, batch_t* batch, int flush_ms);
 
 void decode_rows(const reader_t* reader, batch_t* batch, size_t dst, size_t count);
+
+int reader_init(
+    reader_t* reader,
+    source_t source,
+    const wire_layout_t* wire,
+    const schema_t* schema,
+    size_t buf_cap
+);
+
+void reader_destroy(reader_t* r);

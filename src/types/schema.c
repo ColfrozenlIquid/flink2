@@ -8,8 +8,8 @@ void schema_init(schema_t* schema) {
 }
 
 int schema_add_field(schema_t* schema, const char* name, size_t len, type_t type) {
-    if (schema->count >= SCHEMA_FILED_COUNT) {
-        fprintf(stderr, "Schema can only contain %d fields\n", SCHEMA_FILED_COUNT);
+    if (schema->count >= SCHEMA_FIELD_COUNT) {
+        fprintf(stderr, "Schema can only contain %d fields\n", SCHEMA_FIELD_COUNT);
         return -1;
     }
 

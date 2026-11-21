@@ -2,7 +2,41 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+
+int reader_init(
+    reader_t* reader,
+    source_t source,
+    const wire_layout_t* wire,
+    const schema_t* schema,
+    size_t buf_cap
+) {
+    memset(reader, 0, sizeof(reader_t));
+    if (wire->row_size == 0 || buf_cap < wire->row_size) {
+        return -1;
+    }
+
+    for (size_t i = 0; i < schema->count; i++) {
+        if (wire->offset[i] + type_size(schema->fields[i].type) > wire->row_size)
+            return -1;
+    }
+
+    reader->buf = malloc(buf_cap);
+    if (!reader->buf)
+        return -1;
+
+    reader->src = source;
+    reader->wire = *wire;
+    reader->cap = buf_cap;
+    return 0;
+}
+
+void reader_destroy(reader_t* r) {
+    free(r->buf);
+    r->buf = NULL;
+}
 
 ssize_t reader_fill_batch(reader_t* reader, batch_t* batch, int flush_ms) {
     const size_t row_size = reader->wire.row_size;

@@ -1,5 +1,6 @@
 #include "../include/ops_scalar.h"
 #include "../include/ops_simd.h"
+#include "../include/source/reader.h"
 #include "../include/types/types.h"
 #include "../include/util.h"
 #include <stddef.h>
@@ -18,19 +19,57 @@ static inline double now_sec(void) {
     return ts.tv_sec + ts.tv_nsec * 1e-9;
 }
 
-void create_pool() {
+#pragma pack(push, 1)
+typedef struct {
+    int32_t user_id;
+    float price;
+} wire_row_t; // 8 bytes on the wire
+#pragma pack(pop)
+
+void create_pool(void) {
     batch_pool_t pool;
+    reader_t reader;
     schema_t schema;
     schema.count = 0;
     schema_add_field(&schema, "user_id", 7, T_I32);
     schema_add_field(&schema, "price", 5, T_F32);
-    pool_init(&pool, &schema, 5);
+    if (pool_init(&pool, &schema, 5) != 0)
+        return;
 
-    batch_t* batch = pool_acquire(&pool);
+    // fake incoming stream
+    wire_row_t rows[6];
+    for (int i = 0; i < 6; i++)
+        rows[i] = (wire_row_t){.user_id = 100 + i, .price = 1.5f * (float)(i + 1)};
 
-    fprintf(stdout, "Free count %zu\n", pool.free_count);
+    // max_chunk = 5 splits rows mid-field, like TCP could
+    mem_source_t m = {.data = (const uint8_t*)rows, .len = sizeof rows, .max_chunk = 5};
+
+    wire_layout_t wire = {0};
+    wire.row_size = sizeof(wire_row_t);
+    wire.offset[0] = offsetof(wire_row_t, user_id);
+    wire.offset[1] = offsetof(wire_row_t, price);
+
+    if (reader_init(&reader, (source_t){mem_read, &m}, &wire, &schema, 64) != 0) {
+        pool_destroy(&pool);
+        return;
+    }
+
+    batch_t* batch1 = pool_acquire(&pool);
+    batch_t* batch2 = pool_acquire(&pool);
+    printf("Free count after acquire: %zu\n", pool.free_count);
+
+    ssize_t got = reader_fill_batch(&reader, batch1, -1);
+    printf("filled %zd rows\n", got);
+    // batch1->cols[0] is the int32 user_id column, cols[1] the float price column
+
+    pool_release(&pool, batch1);
+    pool_release(&pool, batch2);
+
+    printf("Free count after release: %zu\n", pool.free_count);
+
+    reader_destroy(&reader);
+    pool_destroy(&pool);
 }
-
 int main() {
     create_pool();
     //     batch_t batch;
